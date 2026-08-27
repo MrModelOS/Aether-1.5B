@@ -5,7 +5,7 @@ Aether-1.5B — JAX + Flax + Optax FRD-MoS для T4 (Вариант 1)
 
 Colab T4 (одна ячейка):
 !pip -q install "jax[cuda12]" flax optax datasets transformers
-!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train_jax.py -o /tmp/jax.py && python /tmp/jax.py --steps 500 --layers 8
+!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train_jax.py -o /tmp/aether_jax.py && python /tmp/aether_jax.py --steps 500 --layers 8
 
 Локально:
 python aether_train_jax.py --steps 500 --layers 8 --seq 512
