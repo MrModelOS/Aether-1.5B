@@ -1,0 +1,20 @@
+services:
+  colab-t4:
+    build:
+      context: .
+      dockerfile: Dockerfile.colab
+    image: aether-colab:t4
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "8888:8888"
+    volumes:
+      - .:/workspace/Aether-1.5B
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all

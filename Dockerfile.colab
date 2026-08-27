@@ -1,0 +1,15 @@
+# Dockerfile.colab — эмуляция Google Colab T4 16GB (CUDA 12.1 + PyTorch cu130)
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y python3 python3-pip git && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 \
+    && pip3 install --no-cache-dir jupyter ipywidgets datasets tqdm
+
+WORKDIR /workspace/Aether-1.5B
+COPY . .
+
+# Проверка T4-эмуляции
+RUN python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
