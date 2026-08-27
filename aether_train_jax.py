@@ -66,14 +66,23 @@ class LowRankMoS(nn.Module):
         delta = jnp.einsum("btr,brd->btd", x_u, V) / jnp.sqrt(self.rank)
         return delta
 
+class FRDSwiGLU(nn.Module):
+    dim: int; hidden: int = 8192
+    @nn.compact
+    def __call__(self, x):
+        gate = nn.Dense(self.hidden, use_bias=False)(x)
+        up = nn.Dense(self.hidden, use_bias=False)(x)
+        return nn.Dense(self.dim, use_bias=False)(nn.silu(gate) * up)
+
 class FRDMoSBlock(nn.Module):
-    dim: int; rank: int = 64
+    dim: int; rank: int = 64; use_swiglu: bool = True
     @nn.compact
     def __call__(self, x, phi):
-        x = FRDOscillator(self.dim)(x) + LowRankMoS(self.dim, self.rank)(x, phi) + x
-        # LayerNorm
-        x = nn.LayerNorm()(x)
-        return x
+        h = FRDOscillator(self.dim)(x) + LowRankMoS(self.dim, self.rank)(x, phi) + x
+        h = nn.LayerNorm()(h)
+        if self.use_swiglu:
+            h = h + FRDSwiGLU(self.dim)(h)
+        return h
 
 class AetherMoS(nn.Module):
     vocab: int; dim: int = 2048; layers: int = 8; rank: int = 64
