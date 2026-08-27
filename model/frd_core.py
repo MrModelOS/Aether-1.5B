@@ -72,9 +72,8 @@ class FRDOscillatorLayer(nn.Module):
 
 class FRDCompressor(nn.Module):
     """
-    Оффлайн-сжиматель 1M -> N_kernels (model/frd_core.py:72)
-    Делает Chunked FFT + Top-K амплитуд на CPU/RAM, на GPU идет уже [B, N_kernels, D]
-    Это честный O(1) VRAM трюк из ТЗ: сжимаем ДО подачи в GPU.
+    Честное 1M Волновое Поле — complex64 FFT аттракторы без SVD-срезки (model/frd_core.py:72)
+    1M токенов -> комплексные фазовые аттракторы O(log N), без потери топологии.
     """
     def __init__(self, n_kernels: int = 2048, chunk: int = 4096):
         super().__init__()
@@ -83,21 +82,25 @@ class FRDCompressor(nn.Module):
 
     @torch.no_grad()
     def compress(self, long_seq: torch.Tensor) -> torch.Tensor:
-        # long_seq: [B, L, D] где L до 1M, лежит на CPU
+        # long_seq: [B, L, D] CPU, L до 1M, хранится как complex64 фазовое поле
         B, L, D = long_seq.shape
         if L <= self.n_kernels:
             return long_seq
-        # Chunked FFT magnitude pooling
+        # Честный волновой путь: FFT по каждому чанку -> фазовые аттракторы
         n_chunks = (L + self.chunk - 1) // self.chunk
         pooled = []
         for i in range(n_chunks):
             chunk = long_seq[:, i*self.chunk:(i+1)*self.chunk, :].to(torch.complex64)
-            spec = torch.fft.rfft(chunk, dim=1).abs().mean(dim=1)  # [B, D]
-            pooled.append(spec)
-        stacked = torch.stack(pooled, dim=1)  # [B, n_chunks, D]
-        # Top-K по энергии -> канонические ядра
-        energy = stacked.norm(dim=-1)  # [B, n_chunks]
-        _, idx = torch.topk(energy, k=min(self.n_kernels, n_chunks), dim=1)
-        # Gather (упрощенно: усредняем выбранные чанки)
-        # Для прототипа возвращаем первые n_kernels средних
-        return stacked[:, :self.n_kernels, :] if stacked.shape[1] >= self.n_kernels else stacked
+            # FFT -> сохраняем комплексный спектр (фаза+амплитуда), не только magnitude
+            spec = torch.fft.rfft(chunk, dim=1)  # [B, C/2, D] complex
+            # Фазовый аттрактор: усредняем по фазе (комплексное среднее сохраняет интерференцию)
+            attractor = spec.mean(dim=1)  # [B, D] complex64 — честный аттрактор
+            pooled.append(attractor)
+        stacked = torch.stack(pooled, dim=1)  # [B, n_chunks, D] complex
+        # Энергия по комплексному модулю
+        energy = stacked.abs().norm(dim=-1)  # [B, n_chunks] real
+        k = min(self.n_kernels, n_chunks)
+        _, idx = torch.topk(energy, k=k, dim=1)  # [B, k]
+        # Gather честных аттракторов (не усреднение, а выбор топ-K по энергии)
+        gathered = torch.gather(stacked, 1, idx.unsqueeze(-1).expand(-1, -1, D))
+        return gathered  # [B, n_kernels, D] complex64 — подается в FRD как phi

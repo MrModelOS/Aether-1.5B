@@ -208,13 +208,13 @@ def get_real_datasets(tokenizer, seq_len=512, streaming=True):
     return RealBroth(datasets, tokenizer, seq_len)
 
 # --- 3. Реальная модель ---
-def build_model(vocab_size, dim=2048, layers=24, rank_mos=16):
+def build_model(vocab_size, dim=2048, layers=24, rank_mos=64):
     from model.mos_field import FRDMoSBlock
     class AetherMoS(nn.Module):
         def __init__(self, vocab, dim, layers, rank):
             super().__init__()
             self.embed = nn.Embedding(vocab, dim)
-            self.blocks = nn.ModuleList([FRDMoSBlock(dim, rank=rank) for _ in range(layers)])
+            self.blocks = nn.ModuleList([FRDMoSBlock(dim, rank=rank, use_swiglu=True) for _ in range(layers)])
             self.lm_head = nn.Linear(dim, vocab, bias=False)
             # вес тайинг как в реальных LLM
             self.lm_head.weight = self.embed.weight
@@ -271,7 +271,17 @@ def train(args):
         it = iter(loader)
         # для Iterable — бесконечный
 
-    model = build_model(vocab, dim=args.dim, layers=args.layers, rank_mos=16).to(device)
+    model = build_model(vocab, dim=args.dim, layers=args.layers, rank_mos=64).to(device)
+    # checkpoint resume для 2B токенов (2-3 захода T4)
+    ckpt = pathlib.Path("aether_export/checkpoint.pt")
+    start_step=0
+    if ckpt.exists() and not args.no_resume:
+        try:
+            ckpt_data=torch.load(str(ckpt), map_location=device)
+            model.load_state_dict(ckpt_data["model"])
+            start_step=ckpt_data.get("step",0)
+            print(f"[resume] loaded {ckpt} step {start_step}")
+        except Exception as e: print(f"[resume] fail {e}")
     # опционально bf16
     use_bf16 = device.type=="cuda" and torch.cuda.is_bf16_supported()
     print(f"[train] bf16={use_bf16}")
@@ -279,6 +289,7 @@ def train(args):
     # === Собственная обучалка на чистом PyTorch (без train_pstc) ===
     from copy import deepcopy
     from optim.galore_adamw8bit import GaLoreAdamW8bit
+    import pickle
     teacher = deepcopy(model)
     for p in teacher.parameters(): p.requires_grad=False
     ema_decay=0.999
@@ -354,12 +365,13 @@ def train(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=500, help="всего шагов (60=~5мин demo, 500=~1ч)")
+    ap.add_argument("--steps", type=int, default=2000, help="всего шагов (60=~5мин demo, 500=~1ч)")
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--seq", type=int, default=512)
     ap.add_argument("--dim", type=int, default=2048)
     ap.add_argument("--layers", type=int, default=8, help="8=~80M быстро, 24=237M честно (нужен рестарт)")
     ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--no-resume", action="store_true", help="не грузить checkpoint")
     args = ap.parse_args()
     # авто-установка зависимостей если нет
     try:

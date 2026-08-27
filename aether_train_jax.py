@@ -5,10 +5,10 @@ Aether-1.5B — JAX + Flax + Optax FRD-MoS для T4 (Вариант 1)
 
 Colab T4 (одна ячейка):
 !pip -q install "jax[cuda12]" flax optax datasets transformers
-!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train_jax.py -o /tmp/aether_jax.py && python /tmp/aether_jax.py --steps 500 --layers 8
+!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train_jax.py -o /tmp/aether_jax.py && python /tmp/aether_jax.py --steps 500 --layers 24
 
 Локально:
-python aether_train_jax.py --steps 500 --layers 8 --seq 512
+python aether_train_jax.py --steps 500 --layers 24 --seq 512
 """
 import os, sys, pathlib, argparse, json, gc
 import jax, jax.numpy as jnp, flax.linen as nn, optax
@@ -52,7 +52,7 @@ class FRDOscillator(nn.Module):
         return out
 
 class LowRankMoS(nn.Module):
-    dim: int; rank: int = 16; latent: int = 64
+    dim: int; rank: int = 64; latent: int = 64
     @nn.compact
     def __call__(self, x, phi): # x,phi [B,T,D]
         # hyper_router: phi -> latent
@@ -67,7 +67,7 @@ class LowRankMoS(nn.Module):
         return delta
 
 class FRDMoSBlock(nn.Module):
-    dim: int; rank: int = 16
+    dim: int; rank: int = 64
     @nn.compact
     def __call__(self, x, phi):
         x = FRDOscillator(self.dim)(x) + LowRankMoS(self.dim, self.rank)(x, phi) + x
@@ -76,12 +76,12 @@ class FRDMoSBlock(nn.Module):
         return x
 
 class AetherMoS(nn.Module):
-    vocab: int; dim: int = 2048; layers: int = 8; rank: int = 16
+    vocab: int; dim: int = 2048; layers: int = 8; rank: int = 64
     @nn.compact
     def __call__(self, ids, phi): # ids [B,T] int, phi [B,T,D]
         x = nn.Embed(self.vocab, self.dim, embedding_init=nn.initializers.normal(0.02))(ids) # [B,T,D]
         for _ in range(self.layers):
-            x = FRDMoSBlock(self.dim, self.rank)(x, phi)
+            x = FRDMoSBlock(self.dim, self.rank, use_swiglu=True)(x, phi)
         logits = nn.Dense(self.vocab, use_bias=False)(x) # [B,T,vocab] (без tying для JAX простоты)
         return logits
 
@@ -162,7 +162,7 @@ def get_tokenizer_and_data(seq_len=512):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=500)
+    ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--seq", type=int, default=512)
     ap.add_argument("--dim", type=int, default=2048)

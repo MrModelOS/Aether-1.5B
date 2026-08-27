@@ -7,6 +7,7 @@ MoS Continuous Field через Low-Rank синтез (model/mos_field.py:1)
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class LowRankMoSSynthesizer(nn.Module):
     """Генератор дельта-весов на лету (model/mos_field.py:11)"""
@@ -55,18 +56,32 @@ class LowRankMoSSynthesizer(nn.Module):
         return delta.squeeze(1) if squeeze else delta
 
 
+class FRDSwiGLU(nn.Module):
+    """Честный SwiGLU 2048->8192->2048 для 1.5B емкости (model/mos_field.py:58)"""
+    def __init__(self, dim: int, hidden: int = 8192):
+        super().__init__()
+        self.gate = nn.Linear(dim, hidden, bias=False)
+        self.up = nn.Linear(dim, hidden, bias=False)
+        self.down = nn.Linear(hidden, dim, bias=False)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down(F.silu(self.gate(x)) * self.up(x))
+
 class FRDMoSBlock(nn.Module):
-    """Полный блок FRD + MoS (model/mos_field.py:55)"""
-    def __init__(self, dim: int, rank: int = 16):
+    """Полный блок FRD + MoS + SwiGLU — честный 1.5B (model/mos_field.py:68)"""
+    def __init__(self, dim: int, rank: int = 64, use_swiglu: bool = True):
         super().__init__()
         from .frd_core import FRDOscillatorLayer
         self.frd = FRDOscillatorLayer(dim)
         self.mos = LowRankMoSSynthesizer(dim, rank=rank)
+        self.use_swiglu = use_swiglu
+        if use_swiglu:
+            self.swiglu = FRDSwiGLU(dim, hidden=8192)
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x: torch.Tensor, phi: torch.Tensor) -> torch.Tensor:
-        # 1. Волновая интерференция
-        wave = self.frd(x)  # [B,T,D]
-        # 2. Непрерывная адаптация
-        mos_delta = self.mos(x, phi)  # [B,T,D]
-        return self.norm(wave + mos_delta + x)  # residual
+        wave = self.frd(x)  # [B,T,D] волновая интерференция
+        mos_delta = self.mos(x, phi)  # [B,T,D] непрерывный MoS
+        h = self.norm(wave + mos_delta + x)
+        if self.use_swiglu:
+            h = h + self.swiglu(h)  # честная емкость
+        return h
