@@ -4,7 +4,7 @@ Aether-1.5B — единый скрипт обучения для Google Colab T
 Вставил в Colab → всё проверил, обновился, запустил
 
 Запуск в Colab (одна ячейка):
-!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train.py -o /tmp/aether_train.py && python /tmp/aether_train.py --steps 120
+!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train.py -o /tmp/aether_train.py && python /tmp/aether_train.py --steps 500
 
 Или локально:
 python aether_train.py --steps 120 --batch 1 --seq 512
@@ -276,11 +276,21 @@ def train(args):
     use_bf16 = device.type=="cuda" and torch.cuda.is_bf16_supported()
     print(f"[train] bf16={use_bf16}")
 
-    from train.train_pstc import PSTCTrainer
-    trainer = PSTCTrainer(model, lr=args.lr, rank=128, ema_decay=0.999)
-    # Стабильные lr
+    # === Собственная обучалка на чистом PyTorch (без train_pstc) ===
+    from copy import deepcopy
+    from optim.galore_adamw8bit import GaLoreAdamW8bit
+    teacher = deepcopy(model)
+    for p in teacher.parameters(): p.requires_grad=False
+    ema_decay=0.999
+    optimizer = GaLoreAdamW8bit(model.parameters(), lr=args.lr, rank=128, update_proj_gap=200)
+    def ema_update():
+        with torch.no_grad():
+            for p, pt in zip(model.parameters(), teacher.parameters()):
+                pt.data.mul_(ema_decay).add_(p.data, alpha=1-ema_decay)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_bf16)
+    # Стабильные lr — можно гонять хоть 10000 шагов
     STAGES = [
-        ("Anchor", args.steps//3, 5e-5, 0.05),  # FIX: 2e-4->5e-5 для старта 10->8
+        ("Anchor", args.steps//3, 5e-5, 0.05),
         ("PSTC", args.steps//3, 3e-5, 0.05),
         ("Swarm", args.steps - 2*(args.steps//3), 2e-5, 0.05),
     ]
@@ -289,28 +299,48 @@ def train(args):
     start=time.time()
     for name, steps, lr, lmb in STAGES:
         print(f"\n=== {name} lr={lr} lambda={lmb} steps={steps} ===")
-        for g in trainer.optimizer.param_groups: g['lr']=lr
+        for g in optimizer.param_groups: g['lr']=lr
         for s in range(steps):
             try:
                 ids, phi = next(it)
             except StopIteration:
                 it = iter(loader); ids, phi = next(it)
             ids, phi = ids.to(device), phi.to(device)
-            # phi должен быть [B,T,D] — если из real_ds phi [seq,D] то unsqueeze
             if phi.dim()==2: phi = phi.unsqueeze(0).expand(ids.shape[0], -1, -1)
             if phi.shape[-1] != args.dim:
-                # проекция если dim не 2048
                 phi = phi[..., :args.dim] if phi.shape[-1] > args.dim else F.pad(phi, (0, args.dim - phi.shape[-1]))
-            stats = trainer.step(ids, phi, lambda_cons=lmb)
+            model.train()
+            # --- forward ---
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bf16):
+                logits = model.forward_lm(ids, phi)  # [B,T,vocab]
+                lm_loss = F.cross_entropy(logits[:, :-1].reshape(-1, logits.size(-1)), ids[:, 1:].reshape(-1), ignore_index=tokenizer.pad_token_id if tokenizer else -100)
+                # PSTC consistency
+                with torch.no_grad():
+                    phi_teacher = teacher(phi[:, :-1], phi[:, :-1])
+                phi_student = model(phi[:, :-1], phi[:, :-1])
+                cons_loss = F.mse_loss(phi_student, phi_teacher.detach())
+                loss = lm_loss + lmb * cons_loss
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            has_nan=False
+            for p in model.parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    has_nan=True; break
+            if has_nan:
+                print(f"[nan] skip step {global_step}"); optimizer.zero_grad(); continue
+            scaler.step(optimizer); scaler.update()
+            ema_update()
+            stats={'loss':loss.item(),'lm':lm_loss.item(),'cons':cons_loss.item()}
             global_step+=1
             if global_step % 5 == 0 or s==0:
                 vram = torch.cuda.memory_allocated()/1024**3 if device.type=="cuda" else 0
                 print(f"step {global_step:03d} loss {stats['loss']:.3f} lm {stats['lm']:.3f} cons {stats['cons']:.4f} VRAM {vram:.2f}GB")
             if global_step % 20 == 0 and device.type=="cuda":
                 torch.cuda.empty_cache()
-            if stats['loss'] != stats['loss']:  # NaN
-                print("NaN loss — стоп")
-                return
+            if stats['loss'] != stats['loss']:
+                print("NaN loss — стоп"); return
     print(f"\n[done] {global_step} steps in {(time.time()-start)/60:.1f} min")
     # экспорт
     out = pathlib.Path("aether_export"); out.mkdir(exist_ok=True)
@@ -324,7 +354,7 @@ def train(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--steps", type=int, default=60, help="всего шагов (60=~5мин demo, 500=~1ч)")
+    ap.add_argument("--steps", type=int, default=500, help="всего шагов (60=~5мин demo, 500=~1ч)")
     ap.add_argument("--batch", type=int, default=1)
     ap.add_argument("--seq", type=int, default=512)
     ap.add_argument("--dim", type=int, default=2048)
