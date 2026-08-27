@@ -1,0 +1,13 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -r requirements.txt
+      - run: python -m train.train_pstc
+      - run: python -c "from model.mos_field import FRDMoSBlock; import torch; m=FRDMoSBlock(256); print(m(torch.randn(2,8,256), torch.randn(2,8,256)).shape)"
