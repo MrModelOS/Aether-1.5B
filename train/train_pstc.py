@@ -67,7 +67,17 @@ class PSTCTrainer:
 
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        # FIX2: жесткий клип 0.5 + NaN чек для 24x2048 стабильности
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.5)
+        # NaN/Inf защита
+        has_nan = False
+        for p in self.model.parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                has_nan = True
+                break
+        if has_nan:
+            self.optimizer.zero_grad()
+            return {"loss": float("nan"), "lm": float("nan"), "cons": cons_loss.item()}
         self.optimizer.step()
         self._ema_update()
 
