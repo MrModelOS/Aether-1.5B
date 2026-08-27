@@ -198,11 +198,11 @@ def get_real_datasets(tokenizer, seq_len=512, streaming=True):
             if self.tok:
                 ids = self.tok(txt, truncation=True, max_length=self.seq_len, padding="max_length")["input_ids"]
                 ids = torch.tensor(ids, dtype=torch.long)
-                phi = torch.randn(self.seq_len, 2048) * 0.8  # phi пока синтетика, но ids реальные
+                phi = torch.randn(self.seq_len, 2048) * 0.5  # phi пока синтетика, но ids реальные
             else:
                 import hashlib
                 ids = torch.tensor([(hashlib.md5(txt.encode()).digest()[i%16] % 32000) for i in range(self.seq_len)], dtype=torch.long)
-                phi = torch.randn(self.seq_len, 2048) * 0.8
+                phi = torch.randn(self.seq_len, 2048) * 0.5
             return ids, phi
 
     return RealBroth(datasets, tokenizer, seq_len)
@@ -221,11 +221,18 @@ def build_model(vocab_size, dim=2048, layers=24, rank_mos=16):
         def forward(self, x, phi):
             for blk in self.blocks: x = blk(x, phi)
             return x
+        def _init_weights(self):
+            nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
+            for blk in self.blocks:
+                nn.init.ones_(blk.frd.amplitudes); nn.init.zeros_(blk.frd.phase_angles)
+                nn.init.ones_(blk.frd.freq_gate)
         def forward_lm(self, input_ids, phi_seq):
             x = self.embed(input_ids)
             h = self.forward(x, phi_seq)
             return self.lm_head(h)
     m = AetherMoS(vocab_size, dim, layers, rank_mos)
+    m._init_weights()
+    # scale lm_head already tied
     print(f"[model] AetherMoS vocab={vocab_size} dim={dim} layers={layers} rank={rank_mos} -> {sum(p.numel() for p in m.parameters())/1e6:.1f}M params")
     return m
 
@@ -273,9 +280,9 @@ def train(args):
     trainer = PSTCTrainer(model, lr=args.lr, rank=128, ema_decay=0.999)
     # Стабильные lr
     STAGES = [
-        ("Anchor", args.steps//3, 2e-4, 0.1),
-        ("PSTC", args.steps//3, 1e-4, 0.1),
-        ("Swarm", args.steps - 2*(args.steps//3), 8e-5, 0.1),
+        ("Anchor", args.steps//3, 5e-5, 0.05),  # FIX: 2e-4->5e-5 для старта 10->8
+        ("PSTC", args.steps//3, 3e-5, 0.05),
+        ("Swarm", args.steps - 2*(args.steps//3), 2e-5, 0.05),
     ]
     global_step=0
     import time
