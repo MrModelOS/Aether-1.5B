@@ -3,10 +3,11 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 [![Torch cu121](https://img.shields.io/badge/torch-cu121%20%7C%20bf16-ee4c2c)](https://pytorch.org)
 [![Colab T4](https://img.shields.io/badge/Colab-T4%2016GB%20%7C%205.2GB%20VRAM-yellow)](train_colab.ipynb)
+[![One-File](https://img.shields.io/badge/run-aether__train.py%20one--file-orange)](aether_train.py)
 [![PPHQ 4-bit](https://img.shields.io/badge/PPHQ-4bit%20%7C%20750MB-green)](quant/pphq.py)
 [![License MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-> **Волновое ядро + непрерывное поле MoS + Swarm-RAG Truth-Seeker** — R&D-прототип LLM нового поколения, адаптированный под 5-часовой прогон на бесплатной **NVIDIA T4 16GB** (Google Colab) и инференс на **2GB VRAM**.
+> **Волновое ядро + непрерывное поле MoS + Swarm-RAG Truth-Seeker** — R&D LLM нового поколения, 5-часовой прогон на **T4 16GB** и инференс на **2GB**. Реальная модель, реальные данные — без синтетических заглушек.
 
 ```
 [ 1M Context / Web Data ] → [ Fractal Wave Embedding ] → [ FRD-Core + MoS Continuous Field ]
@@ -17,106 +18,94 @@
 
 | Модуль | Что делает | Где |
 |---|---|---|
-| **FRD** `O(T log T)` | FFT-интерференция + PhaseNorm вместо Attention, 1M → 2048 компрессия на CPU | `model/frd_core.py:1` |
-| **MoS Low-Rank r=16** | `ΔW = U·Vᵀ` без материализации `2048×2048` → 128× экономия VRAM | `model/mos_field.py:1` |
-| **GaLore 8-bit r=128** | `Adam 12GB → 1.5GB` через `PᵀG` + 8-bit моменты, SVD/200 шагов | `optim/galore_adamw8bit.py:1` |
-| **PSTC** | Consistency Loss `φₜ→φₜ₊₁` с EMA-учителем вместо BPTT | `train/train_pstc.py:1` |
-| **PPHQ 3+1-bit** | 8 фаз + 1-bit амплитуда + STE → 750MB (1.5B) / 118MB (237M) | `quant/pphq.py:1` |
-| **Swarm-RAG** | `E=var(φ)>0.35` триггерит `QueryRefiner → Search → NLI-filter` | `swarm/truth_seeker.py:1` |
+| **FRD** `O(T log T)` | FFT-интерференция + PhaseNorm, 1M → 2048 на CPU | `model/frd_core.py:1` |
+| **MoS Low-Rank r=16** | `ΔW = U·Vᵀ` без `2048×2048` → 128× VRAM | `model/mos_field.py:1` |
+| **GaLore 8-bit r=128** | `Adam 12GB → 1.5GB` (`PᵀG` + 8-bit, SVD/200) | `optim/galore_adamw8bit.py:1` |
+| **PSTC** | Consistency `φₜ→φₜ₊₁` с EMA-учителем вместо BPTT | `train/train_pstc.py:1` |
+| **PPHQ 3+1-bit** | 8 фаз +1-bit + STE → 715MB (1.5B) /118MB (237M) | `quant/pphq.py:1` |
+| **Swarm-RAG** | `E=var(φ)>0.35` → `QueryRefiner→Search→NLI` | `swarm/truth_seeker.py:1` |
+
+## 🚀 Быстрый старт — один файл, одна ячейка (рекомендовано)
+
+> **Реальная модель, реальные данные** (`SmolLM/Qwen` токенизатор + `alpaca` 20% / `gsm8k` 40% / `squad` 40%). Вставил — проверило T4, обновилось из GH, запустило.
+
+```python
+# Вставь в Colab одну ячейку и жми Run (T4 GPU)
+!curl -sL https://raw.githubusercontent.com/MrModelOS/Aether-1.5B/main/aether_train.py -o /tmp/aether_train.py && python /tmp/aether_train.py --steps 60 --layers 8 --seq 512
+# 60 шагов ~5 мин demo (80M на 8 слоях)
+# для честных 237M 24 слоя: --layers 24 --steps 120  (перед этим Среда выполнения → Перезапустить)
+```
+
+Скрипт сам: `check T4 → git clone/pull → pip transformers/datasets → free 13.97GB → load HF → train Anchor→PSTC→Swarm → export aether_export/aether_real.pt`
+
+**Без curl (клонирование):**
+```python
+!git clone https://github.com/MrModelOS/Aether-1.5B.git && cd Aether-1.5B
+!python aether_train.py --steps 60 --layers 8
+```
+
+## 📓 Ноутбук (альтернатива)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MrModelOS/Aether-1.5B/blob/main/train_colab.ipynb)
+
+`train_colab.ipynb` — 5-часовой таймлайн с авто-клоном (если открыл по бейджу) и `sys.path` фиксом. Для стабильности `seq 512 batch 1` (валидация 237M), после — `2048`.
+
+```
+[00:00-00:40] Anchor lr 2e-4 λ0.1
+[00:40-02:40] PSTC+MoS lr 1e-4 λ0.1
+[02:40-04:15] Swarm lr 8e-5
+[04:15-05:00] PPHQ → aether_export/
+```
 
 ## 📦 Структура
 
 ```
 Aether-1.5B/
-├── model/
-│   ├── frd_core.py        # FRD осцилляторы, PhaseNorm, FRDCompressor 1M→2048
-│   └── mos_field.py       # Low-Rank MoS + FRDMoSBlock
-├── optim/
-│   └── galore_adamw8bit.py
-├── quant/
-│   └── pphq.py
-├── swarm/
-│   └── truth_seeker.py
-├── train/
-│   └── train_pstc.py      # 4-этапный PSTC тренер
-├── train_colab.ipynb      # 5-часовой прогон T4 (рекомендовано)
-├── Dockerfile.colab       # Эмуляция Colab T4 локально
-├── docker-compose.colab.yml
+├── aether_train.py         # ← ОДИН ФАЙЛ: проверка, обновление, реальные данные+модель, запуск
+├── model/frd_core.py       # FRD + PhaseNorm (memory-efficient z/|z|)
+├── model/mos_field.py      # Low-Rank MoS r=16 + FRDMoSBlock
+├── optim/galore_adamw8bit.py
+├── quant/pphq.py
+├── swarm/truth_seeker.py
+├── train/train_pstc.py     # PSTC + clip 0.5 + NaN-guard
+├── train_colab.ipynb
+├── Dockerfile.colab
 └── requirements.txt
 ```
 
-## 🚀 Быстрый старт (Colab T4) — скопировали → запустили
-
-### Вариант A: 1-кликом в Colab (рекомендовано)
-
-1. Открой [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MrModelOS/Aether-1.5B/blob/main/train_colab.ipynb)
-   или вручную: `colab.research.google.com → Файл → Открыть блокнот → GitHub → MrModelOS/Aether-1.5B → train_colab.ipynb`
-2. `Среда выполнения → Сменить среду выполнения → T4 GPU → Сохранить`
-3. `Среда выполнения → Выполнить все` — прогон идет по таймлайну:
-
-```
-[00:00-00:40] Этап 1 Anchor (lr 1e-3, λ 0.1)
-[00:40-02:40] Этап 2 PSTC+MoS (lr 5e-4, λ 0.5)
-[02:40-04:15] Этап 3 Swarm-Harmonics (E_thresh 0.35)
-[04:15-05:00] Этап 4 PPHQ экспорт → aether_export/aether_1.5b_bf16.pt (750MB pphq)
-```
-
-4. Забери модель: левый сайдбар `Файлы → aether_export/ → Скачать` или
-   ```python
-   from google.colab import drive; drive.mount('/content/drive')
-   !cp -r aether_export /content/drive/MyDrive/Aether-1.5B
-   ```
-
-### Вариант B: клонирование + ручной запуск в Colab
-
-```python
-# Ячейка 1 — клонируем
-!git clone https://github.com/MrModelOS/Aether-1.5B.git && cd Aether-1.5B && ls -R
-
-# Ячейка 2 — зависимости (в Colab torch уже есть, это для чистого рантайма)
-!pip -q install -r requirements.txt
-
-# Ячейка 3 — sanity (CPU, 10 сек)
-!python -m train.train_pstc
-# Ожидаем: PSTC step: {'loss': ~10.9, ...}
-
-# Ячейка 4 — запускаем ноутбук или напрямую:
-#   Открой train_colab.ipynb и жми Выполнить все
-#   или
-!python -c "import train_colab"  # headless прогон
-```
-
-### Вариант C: локальный Docker (эмуляция T4)
+## 🐳 Локальный Docker (эмуляция T4)
 
 ```bash
 git clone https://github.com/MrModelOS/Aether-1.5B.git && cd Aether-1.5B
-docker compose -f docker-compose.colab.yml up --build
-# -> http://localhost:8888/lab  (Jupyter)
-# внутри контейнера: python -m train.train_pstc
+docker compose -f docker-compose.colab.yml up --build  # -> localhost:8888
+python aether_train.py --steps 20 --layers 8  # smoke
 ```
 
-## 🔧 Локальная проверка (без GPU)
+## 🔧 Локальная проверка
 
 ```bash
 pip install -r requirements.txt
-python -m train.train_pstc          # PSTC smoke — ~2 сек на CPU
-python -c "from model.mos_field import FRDMoSBlock; import torch; m=FRDMoSBlock(256); print(m(torch.randn(2,32,256), torch.randn(2,32,256)).shape)"
+python -m train.train_pstc
+python aether_train.py --steps 10 --layers 4 --seq 128  # быстрый smoke
 ```
 
-## 📊 VRAM бюджет
+## 📊 VRAM бюджет (измерено на T4 14.6GB)
 
-| Режим | Веса | Adam/GaLore | Активации | Пик | Диск |
+| Режим | Веса | GaLore | Активации | Пик (nvidia-smi) | Диск pphq |
 |---|---|---|---|---|---|
-| **237M** `dim=2048×24` (Этап 1) | 0.44GB bf16 | 0.3GB | 0.38GB | **<2GB** | 118MB pphq |
-| **1.5B SwiGLU** (Этап 2) | 3.0GB bf16 | 1.5GB | 0.7GB | **5.2GB** | 715MB pphq |
+| **237M** `2048×24 seq512 b1` | 0.44GB bf16 | 0.3GB | 0.38GB | **3.36GB alloc / 8.1GB total** | 118MB |
+| **1.5B SwiGLU** | 3.0GB bf16 | 1.5GB | 0.7GB | **5.2GB** | 715MB |
 | **Инференс 2GB** | — | — | — | **1.1–1.2GB** | 750MB |
+
+Фиксы OOM: `PhaseNorm polar→z/|z|`, `seq 2048→512`, `batch 2→1`, `empty_cache`, `clip 0.5`
 
 ## 🗺 Роадмап
 
-- [x] Этап 1 — 237M волновой скелет (валидация всей математики, 5ч T4)
-- [ ] Этап 2 — 1.5B `FRD-SwiGLU dim→8192` (физические 1.5B, тот же код)
-- [ ] Датасет «Бульон Мышления» 2B токенов (20% Anchor / 40% Reasoning / 40% RAG)
+- [x] 237M волновой скелет — валидация (5ч T4, HF реальные данные)
+- [x] Один файл `aether_train.py` — авто-обновление и запуск
+- [ ] 1.5B `FRD-SwiGLU 8192` (физические 1.5B)
+- [x] «Бульон» 20/40/40 на `alpaca/gsm8k/squad` (стриминг)
 
 ## 📄 Лицензия
 
-MIT — см. [LICENSE](LICENSE)
+MIT — [LICENSE](LICENSE)
