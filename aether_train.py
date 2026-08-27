@@ -14,15 +14,23 @@ import os, sys, pathlib, subprocess, gc, json, math, argparse, shutil
 # --- 0. Авто-обновление из GH если запущен в /content ---
 def self_update():
     try:
-        # если мы в колабе и репо уже склонировано — pull
+        # если мы в колабе и репо уже склонировано — pull (без бесконечного цикла)
         for cand in [pathlib.Path("/content/Aether-1.5B"), pathlib.Path("Aether-1.5B")]:
             if (cand / "aether_train.py").exists():
                 print(f"[update] git pull {cand}")
                 subprocess.run(["git", "-C", str(cand), "pull", "--ff-only"], check=False)
-                # копируем свежую версию в текущий файл если нужно
+                # копируем только если файлы отличаются по хэшу
                 src = cand / "aether_train.py"
                 dst = pathlib.Path(__file__).resolve()
-                if src.resolve() != dst.resolve() and src.exists():
+                if src.resolve() != dst.resolve() and src.exists() and dst.exists():
+                    import hashlib
+                    if hashlib.md5(src.read_bytes()).hexdigest() != hashlib.md5(dst.read_bytes()).hexdigest():
+                        shutil.copy(src, dst)
+                        print(f"[update] copied {src} -> {dst}, restarting")
+                        os.execv(sys.executable, [sys.executable, str(dst)] + sys.argv[1:])
+                    else:
+                        print(f"[update] {dst} уже актуален")
+                elif src.resolve() != dst.resolve() and src.exists():
                     shutil.copy(src, dst)
                     print(f"[update] copied {src} -> {dst}, restarting")
                     os.execv(sys.executable, [sys.executable, str(dst)] + sys.argv[1:])
@@ -31,7 +39,6 @@ def self_update():
             if pathlib.Path("/content").exists():
                 print("[update] cloning MrModelOS/Aether-1.5B -> /content/Aether-1.5B")
                 subprocess.run(["git", "clone", "https://github.com/MrModelOS/Aether-1.5B.git", "/content/Aether-1.5B"], check=False)
-                # добавляем в путь
                 if "/content/Aether-1.5B" not in sys.path:
                     sys.path.insert(0, "/content/Aether-1.5B")
                 os.chdir("/content/Aether-1.5B")
