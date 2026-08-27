@@ -104,7 +104,7 @@ def create_state(rng, model, vocab, dim, layers, seq, lr):
     params = model.init(rng, dummy_ids, dummy_phi)
     tx = optax.chain(
         optax.clip_by_global_norm(0.5),
-        optax.adamw(lr, b1=0.9, b2=0.999, weight_decay=0.01),
+        optax.adamw(lr, b1=0.9, b2=0.999, weight_decay=0.01, mu_dtype=jnp.bfloat16),  # FIX: 13.6GB->6.8GB для 1.72B на T4
     )
     state = TrainState.create(apply_fn=model.apply, params=params, ema_params=params, tx=tx)
     return state
@@ -183,7 +183,7 @@ def main():
     model = AetherMoS(vocab=vocab, dim=args.dim, layers=args.layers)
 
     state = create_state(rng, model, vocab, args.dim, args.layers, args.seq, args.lr)
-    print(f"[model] {args.layers}x{args.dim} vocab {vocab} -> {sum(p.size for p in jax.tree_util.tree_leaves(state.params))/1e6:.1f}M params")
+    print(f"[model] {args.layers}x{args.dim} vocab {vocab} -> {sum(p.size for p in jax.tree_util.tree_leaves(state.params))/1e6:.1f}M params | opt bfloat16")
     print(f"[train] steps {args.steps} seq {args.seq} dim {args.dim} layers {args.layers} lr {args.lr}")
 
     # infinite gen -> batch 1
