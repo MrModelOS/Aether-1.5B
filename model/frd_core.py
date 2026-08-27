@@ -19,15 +19,16 @@ class PhaseNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(dim))
 
     def forward(self, z: torch.Tensor) -> torch.Tensor:
-        # z: [B, T, D] complex64
+        # z: [B, T, D] complex64 — memory-efficient без angle/polar
         amp = torch.abs(z)  # [B, T, D] real
-        # нормализуем только амплитуду, фаза untouched
         mean_amp = amp.mean(dim=-1, keepdim=True)
         var_amp = amp.var(dim=-1, keepdim=True, unbiased=False)
         amp_norm = (amp - mean_amp) / torch.sqrt(var_amp + self.eps)
-        amp_norm = amp_norm * self.weight + self.bias
-        phase = torch.angle(z)
-        return torch.polar(amp_norm.clamp(min=0), phase)
+        amp_norm = (amp_norm * self.weight + self.bias).clamp(min=0)
+        # сохраняем фазу без angle/polar: z / |z| = exp(i*phase)
+        # avoid division by zero
+        phase_unit = z / (amp + self.eps).to(z.dtype)  # [B,T,D] complex unit
+        return amp_norm.to(z.dtype) * phase_unit  # [B,T,D] complex
 
 
 class FRDOscillatorLayer(nn.Module):
