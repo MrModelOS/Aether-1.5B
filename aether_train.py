@@ -102,54 +102,85 @@ def get_real_datasets(tokenizer, seq_len=512, streaming=True):
             ids = [(h.md5(txt.encode()).digest()[i%16] % 32000) for i in range(seq_len)]
         return {"ids": ids}
 
+    # кандидаты с фолбэками (стриминг часто падает на старых скриптах)
+    def try_load(name, config=None, streaming=True):
+        ids = [name] if config is None else [f"{name}:{config}"]
+        # для gsm8k/squad пробуем алиасы
+        alias = {"gsm8k": ["openai/gsm8k", "gsm8k"], "squad": ["rajpurkar/squad", "squad"]}
+        for nid in alias.get(name, [name]):
+            for stream in ([streaming, False] if streaming else [False]):
+                try:
+                    kwargs = dict(split="train", streaming=stream, trust_remote_code=True)
+                    if config: ds = load_dataset(nid, config, **kwargs)
+                    else: ds = load_dataset(nid, **kwargs)
+                    # берем 2000
+                    res = ds.take(2000) if stream else ds.select(range(min(2000, len(ds))))
+                    print(f"[data] {nid} ok streaming={stream}")
+                    return res
+                except Exception as e:
+                    print(f"[data] {nid} stream={stream} fail: {e}")
+                    continue
+        return None
+
     datasets = {}
-    try:
-        print("[data] loading tatsu-lab/alpaca (anchor 20%)...")
-        ds = load_dataset("tatsu-lab/alpaca", split="train", streaming=streaming)
-        # берем 2000 примеров
-        datasets["anchor"] = ds.take(2000) if streaming else ds.select(range(min(2000, len(ds))))
-    except Exception as e:
-        print(f"[data] alpaca fail: {e}")
-    try:
-        print("[data] loading gsm8k (reasoning 40%)...")
-        ds = load_dataset("gsm8k", "main", split="train", streaming=streaming)
-        datasets["reasoning"] = ds.take(2000) if streaming else ds.select(range(min(2000, len(ds))))
-    except Exception as e:
-        print(f"[data] gsm8k fail: {e}")
-    try:
-        print("[data] loading squad (rag 40%)...")
-        ds = load_dataset("squad", split="train", streaming=streaming)
-        datasets["rag"] = ds.take(2000) if streaming else ds.select(range(min(2000, len(ds))))
-    except Exception as e:
-        print(f"[data] squad fail: {e}")
+    for key, (name, cfg) in [("anchor", ("tatsu-lab/alpaca", None)), ("reasoning", ("gsm8k", "main")), ("rag", ("squad", None))]:
+        ds = try_load(name, cfg, streaming=streaming)
+        if ds is not None:
+            datasets[key] = ds
+        else:
+            print(f"[data] {key} {name} skipped — будет синтетический фолбэк для этой доли")
 
     if not datasets:
         print("[data] все HF загрузки провалились — синтетика")
         return None
 
+    # если хоть что-то загрузилось — делаем Iterable, иначе фолбэк
+    if len(datasets) < 3:
+        # дополняем синтетикой недостающие доли
+        print(f"[data] загружено {list(datasets.keys())} — недостающие доли будут синтетикой")
+        # не возвращаем None, а продолжаем с тем что есть + синтетика в итере
     # оборачиваем в torch Iterable
     class RealBroth(torch.utils.data.IterableDataset):
         def __init__(self, datasets, tok, seq_len):
             self.datasets = datasets; self.tok=tok; self.seq_len=seq_len
         def __iter__(self):
             import itertools, random
-            # round-robin 20/40/40
-            it_anchor = iter(self.datasets.get("anchor", []))
-            it_reason = iter(self.datasets.get("reasoning", []))
-            it_rag = iter(self.datasets.get("rag", []))
+            # round-robin 20/40/40 — с фолбэком на синтетику если ключа нет
+            def make_iter(key):
+                ds = self.datasets.get(key)
+                if ds is None: return None
+                return iter(ds)
+            it_anchor = make_iter("anchor")
+            it_reason = make_iter("reasoning")
+            it_rag = make_iter("rag")
             while True:
+                # 40% reasoning (2/5)
+                for _ in range(2):
+                    if it_reason is None:
+                        # синтетический reasoning
+                        yield (torch.randint(0, 49152, (self.seq_len,)), torch.randn(self.seq_len, 2048)*1.0)
+                    else:
+                        try: ex = next(it_reason)
+                        except:
+                            it_reason = make_iter("reasoning"); ex = next(it_reason)
+                        yield self._to_tensor(ex)
                 # 20% anchor
-                for _ in range(2):
-                    try: ex = next(it_reason)
-                    except: it_reason = iter(self.datasets["reasoning"]); ex = next(it_reason)
+                if it_anchor is None:
+                    yield (torch.randint(0, 49152, (self.seq_len,)), torch.randn(self.seq_len, 2048)*0.5)
+                else:
+                    try: ex = next(it_anchor)
+                    except:
+                        it_anchor = make_iter("anchor"); ex = next(it_anchor)
                     yield self._to_tensor(ex)
-                try: ex = next(it_anchor)
-                except: it_anchor = iter(self.datasets["anchor"]); ex = next(it_anchor)
-                yield self._to_tensor(ex)
+                # 40% rag
                 for _ in range(2):
-                    try: ex = next(it_rag)
-                    except: it_rag = iter(self.datasets["rag"]); ex = next(it_rag)
-                    yield self._to_tensor(ex)
+                    if it_rag is None:
+                        yield (torch.randint(0, 49152, (self.seq_len,)), torch.randn(self.seq_len, 2048)*1.5)
+                    else:
+                        try: ex = next(it_rag)
+                        except:
+                            it_rag = make_iter("rag"); ex = next(it_rag)
+                        yield self._to_tensor(ex)
         def _to_tensor(self, ex):
             txt = ""
             if isinstance(ex, dict):
